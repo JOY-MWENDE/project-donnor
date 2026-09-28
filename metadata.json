@@ -1,0 +1,6 @@
+{
+  "name": "DonorKonnect",
+  "description": "Connecting life-saving blood, plasma, and organ donors with patients and hospitals in real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
