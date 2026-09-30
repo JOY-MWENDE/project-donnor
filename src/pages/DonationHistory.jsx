@@ -1,42 +1,111 @@
-// DonationHistory — table (desktop) + cards (mobile) with search, filter, sort
-import { useState, useMemo } from 'react';
-import { Search, Droplet, Filter, ArrowUpDown } from 'lucide-react';
+// DonationHistory — table (desktop) + cards (mobile) with live API, search, filter, sort
+import { useState, useMemo, useEffect } from 'react';
+import { Search, Droplet, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import StatusBadge from '../components/StatusBadge';
 import DonationCard from '../components/DonationCard';
-import { getDonations } from '../store';
+import { useAuth } from '../auth';
+import { useToast } from '../toast';
+import { getUserDonations } from '../service/donationService'; // Adjust path if located in ../donationService
 
 export default function DonationHistory() {
+  const { user } = useAuth();
+  const { toast } = useToast();
+
+  const [donations, setDonations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
   const [search, setSearch] = useState('');
   const [bloodFilter, setBloodFilter] = useState('');
   const [sort, setSort] = useState('newest');
 
-  const donations = getDonations();
+  const fetchHistory = async () => {
+    const activeUserId = user?.id || localStorage.getItem('userId');
+    if (!activeUserId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const data = await getUserDonations(activeUserId);
+
+      // Normalize API response fields to component keys
+      const normalized = (Array.isArray(data) ? data : []).map((item) => ({
+        id: item.id,
+        hospital: item.hospital || '—',
+        date: item.donationDate || '—',
+        time: item.donationTime || '—',
+        bloodGroup: item.bloodGroup || '—',
+        units: Number(item.unitsDonated) || 1,
+        location: item.location || '—',
+        status: (item.status || 'PENDING').toLowerCase(),
+        nextEligibleDate: item.nextEligibleDate,
+      }));
+
+      setDonations(normalized);
+    } catch (err) {
+      const msg = err.message || 'Unable to load donation history.';
+      setError(msg);
+      toast(msg, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchHistory();
+  }, [user?.id]);
 
   const filtered = useMemo(() => {
     let list = [...donations];
+
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter((d) =>
-        d.hospital.toLowerCase().includes(q) ||
-        d.location.toLowerCase().includes(q) ||
-        d.bloodGroup.toLowerCase().includes(q)
+      list = list.filter(
+        (d) =>
+          d.hospital.toLowerCase().includes(q) ||
+          d.location.toLowerCase().includes(q) ||
+          d.bloodGroup.toLowerCase().includes(q)
       );
     }
-    if (bloodFilter) list = list.filter((d) => d.bloodGroup === bloodFilter);
+
+    if (bloodFilter) {
+      list = list.filter((d) => d.bloodGroup === bloodFilter);
+    }
+
     list.sort((a, b) => {
-      const da = new Date(a.date), db = new Date(b.date);
+      const da = new Date(a.date).getTime() || 0;
+      const db = new Date(b.date).getTime() || 0;
       return sort === 'newest' ? db - da : da - db;
     });
+
     return list;
   }, [donations, search, bloodFilter, sort]);
 
-  const totalUnits = donations.reduce((sum, d) => sum + d.units, 0);
+  const totalUnits = useMemo(
+    () => donations.reduce((sum, d) => sum + (d.units || 0), 0),
+    [donations]
+  );
 
   return (
     <div>
-      <div className="page-header">
-        <h1>Donation History</h1>
-        <p>Track all your blood donations over time.</p>
+      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h1>Donation History</h1>
+          <p>Track all your blood donations over time.</p>
+        </div>
+        <button
+          className="btn btn-outline btn-sm"
+          onClick={fetchHistory}
+          disabled={loading}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px' }}
+        >
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          Refresh
+        </button>
       </div>
 
       {/* Compact Header & Metrics Strip */}
@@ -53,18 +122,30 @@ export default function DonationHistory() {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-            <span style={{ fontSize: '0.74rem', color: 'var(--neutral-500)', textTransform: 'uppercase', fontWeight: 700 }}>Donations:</span>
-            <span style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--primary-700)' }}>{donations.length}</span>
+            <span style={{ fontSize: '0.74rem', color: 'var(--neutral-500)', textTransform: 'uppercase', fontWeight: 700 }}>
+              Donations:
+            </span>
+            <span style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--primary-700)' }}>
+              {donations.length}
+            </span>
           </div>
           <div style={{ width: 1, height: 20, background: 'var(--neutral-300)' }} />
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-            <span style={{ fontSize: '0.74rem', color: 'var(--neutral-500)', textTransform: 'uppercase', fontWeight: 700 }}>Total Units:</span>
-            <span style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--neutral-900)' }}>{totalUnits}</span>
+            <span style={{ fontSize: '0.74rem', color: 'var(--neutral-500)', textTransform: 'uppercase', fontWeight: 700 }}>
+              Total Units:
+            </span>
+            <span style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--neutral-900)' }}>
+              {totalUnits}
+            </span>
           </div>
           <div style={{ width: 1, height: 20, background: 'var(--neutral-300)' }} />
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-            <span style={{ fontSize: '0.74rem', color: 'var(--neutral-500)', textTransform: 'uppercase', fontWeight: 700 }}>Type:</span>
-            <span style={{ fontSize: '1.1rem', fontWeight: 900, color: 'var(--primary-600)' }}>{donations[0]?.bloodGroup || '—'}</span>
+            <span style={{ fontSize: '0.74rem', color: 'var(--neutral-500)', textTransform: 'uppercase', fontWeight: 700 }}>
+              Type:
+            </span>
+            <span style={{ fontSize: '1.1rem', fontWeight: 900, color: 'var(--primary-600)' }}>
+              {user?.bloodGroup || donations[0]?.bloodGroup || '—'}
+            </span>
           </div>
         </div>
 
@@ -74,7 +155,7 @@ export default function DonationHistory() {
             <Search size={15} className="search-icon" />
             <input
               className="input"
-              placeholder="Search hospital..."
+              placeholder="Search hospital or city..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search donations"
@@ -89,7 +170,11 @@ export default function DonationHistory() {
             style={{ padding: '6px 28px 6px 10px', fontSize: '0.8rem', width: 'auto' }}
           >
             <option value="">All Groups</option>
-            {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((g) => <option key={g} value={g}>{g}</option>)}
+            {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((g) => (
+              <option key={g} value={g}>
+                {g}
+              </option>
+            ))}
           </select>
           <select
             className="select"
@@ -104,14 +189,51 @@ export default function DonationHistory() {
         </div>
       </div>
 
-      {/* Table (desktop) */}
-      {filtered.length === 0 ? (
+      {/* Main Content Area: Loading / Error / Empty / Data */}
+      {loading ? (
+        <div
+          className="card card-pad"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '48px 16px',
+            gap: 12,
+          }}
+        >
+          <Loader2 size={32} className="animate-spin" color="var(--primary-600)" />
+          <span style={{ fontSize: '0.86rem', color: 'var(--neutral-500)' }}>
+            Retrieving donation records...
+          </span>
+        </div>
+      ) : error ? (
+        <div
+          className="card card-pad"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '36px 16px',
+            gap: 10,
+            textAlign: 'center',
+          }}
+        >
+          <AlertCircle size={36} color="var(--danger-500, #ef4444)" />
+          <p style={{ margin: 0, fontWeight: 600, color: 'var(--neutral-800)' }}>{error}</p>
+          <button className="btn btn-outline btn-sm" onClick={fetchHistory}>
+            Try Again
+          </button>
+        </div>
+      ) : filtered.length === 0 ? (
         <div className="empty-state">
           <Droplet size={48} className="es-icon" color="var(--neutral-300)" />
           <p>No donations found matching your filters.</p>
         </div>
       ) : (
         <>
+          {/* Table (desktop) */}
           <div className="table-wrap hidden-mobile">
             <table className="table">
               <thead>
@@ -131,10 +253,16 @@ export default function DonationHistory() {
                     <td style={{ fontWeight: 600 }}>{d.hospital}</td>
                     <td>{d.date}</td>
                     <td>{d.time}</td>
-                    <td><span style={{ fontWeight: 700, color: 'var(--primary-600)' }}>{d.bloodGroup}</span></td>
+                    <td>
+                      <span style={{ fontWeight: 700, color: 'var(--primary-600)' }}>
+                        {d.bloodGroup}
+                      </span>
+                    </td>
                     <td>{d.units}</td>
                     <td>{d.location}</td>
-                    <td><StatusBadge status={d.status} /></td>
+                    <td>
+                      <StatusBadge status={d.status} />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -143,7 +271,9 @@ export default function DonationHistory() {
 
           {/* Cards (mobile) */}
           <div className="hidden-desktop">
-            {filtered.map((d) => <DonationCard key={d.id} donation={d} />)}
+            {filtered.map((d) => (
+              <DonationCard key={d.id} donation={d} />
+            ))}
           </div>
         </>
       )}

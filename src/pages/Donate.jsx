@@ -1,13 +1,15 @@
-// Donate page — availability toggle + donation recording form
+// Donate page — availability toggle + donation recording form with live API
 import { useState } from 'react';
-import { Droplet, CheckCircle2, Building2, Calendar, Clock, MapPin, Package, Navigation } from 'lucide-react';
+import { Droplet, CheckCircle2, Navigation, Loader2 } from 'lucide-react';
 import { useAuth } from '../auth';
 import { useToast } from '../toast';
 import StatusBadge from '../components/StatusBadge';
 import HospitalGpsModal from '../components/HospitalGpsModal';
 import { addDonation, addNotification, formatDate, eligibleDate } from '../store';
+import { recordDonation } from '../service/donationService'; // Adjust path if located in ../donationService
 
 const HOSPITALS = [
+  'Kenyatta',
   'Kenyatta National Hospital',
   'Aga Khan University Hospital',
   'Mater Hospital',
@@ -22,17 +24,26 @@ export default function Donate() {
   const { toast } = useToast();
 
   const [form, setForm] = useState({
-    hospital: '', date: '', time: '', bloodGroup: user.bloodGroup, units: 1, location: user.location,
+    hospital: '',
+    date: '',
+    time: '',
+    bloodGroup: user?.bloodGroup || 'O+',
+    units: 1,
+    location: user?.cityLocation || user?.location || '',
   });
   const [errors, setErrors] = useState({});
   const [gpsModal, setGpsModal] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   if (!user) return null;
 
   const toggleAvailability = () => {
     const updated = { ...user, available: !user.available };
     updateProfile(updated);
-    toast(`Your donation availability has been updated to ${updated.available ? 'Available' : 'Unavailable'}.`, 'success');
+    toast(
+      `Your donation availability has been updated to ${updated.available ? 'Available' : 'Unavailable'}.`,
+      'success'
+    );
   };
 
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
@@ -43,31 +54,82 @@ export default function Donate() {
     if (!form.date) e.date = 'Donation date is required.';
     if (!form.time) e.time = 'Donation time is required.';
     if (!form.bloodGroup) e.bloodGroup = 'Blood group is required.';
-    if (!form.units || form.units < 1) e.units = 'Units must be at least 1.';
+    if (!form.units || Number(form.units) < 1) e.units = 'Units must be at least 1.';
     if (!form.location.trim()) e.location = 'Location is required.';
     setErrors(e);
     return Object.keys(e).length === 0;
   };
 
-  const handleSubmit = (ev) => {
+  const handleSubmit = async (ev) => {
     ev.preventDefault();
     if (!validate()) {
       toast('Please fill in all required fields.', 'error');
       return;
     }
-    addDonation(form);
-    const updated = { ...user, lastDonation: form.date, available: false };
-    updateProfile(updated);
-    addNotification({
-      title: 'Successful Donation',
-      message: `Your donation of ${form.units} unit(s) of ${form.bloodGroup} blood at ${form.hospital} has been recorded. Thank you!`,
-      type: 'success',
-    });
-    toast('Your donation has been recorded successfully.', 'success');
-    setForm({ hospital: '', date: '', time: '', bloodGroup: user.bloodGroup, units: 1, location: user.location });
+
+    setSubmitting(true);
+
+    try {
+      // 1. Submit to the live API
+      const response = await recordDonation({
+        userId: user.id,
+        hospital: form.hospital,
+        donationDate: form.date,
+        donationTime: form.time,
+        bloodGroup: form.bloodGroup,
+        unitsDonated: form.units,
+        location: form.location.trim(),
+      });
+
+      const serverData = response.data || {};
+      const nextEligible = serverData.nextEligibleDate || form.date;
+
+      // 2. Synchronize local store and user state
+      addDonation({
+        id: serverData.id || Date.now(),
+        hospital: form.hospital,
+        date: form.date,
+        time: form.time,
+        bloodGroup: form.bloodGroup,
+        units: Number(form.units),
+        location: form.location,
+        status: serverData.status || 'CONFIRMED',
+      });
+
+      const updated = {
+        ...user,
+        lastDonation: form.date,
+        nextEligibleDate: nextEligible,
+        available: false,
+      };
+      updateProfile(updated);
+
+      addNotification({
+        title: 'Successful Donation',
+        message: `Your donation of ${form.units} unit(s) of ${form.bloodGroup} blood at ${form.hospital} has been recorded. Next eligible donation: ${nextEligible}. Thank you!`,
+        type: 'success',
+      });
+
+      toast(response.message || 'Your donation has been recorded successfully.', 'success');
+
+      // Reset form
+      setForm({
+        hospital: '',
+        date: '',
+        time: '',
+        bloodGroup: user.bloodGroup || 'O+',
+        units: 1,
+        location: user.cityLocation || user.location || '',
+      });
+      setErrors({});
+    } catch (err) {
+      toast(err.message || 'Failed to submit donation. Please try again.', 'error');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  const nextEligible = eligibleDate(user.lastDonation);
+  const nextEligible = user.nextEligibleDate || eligibleDate(user.lastDonation);
 
   return (
     <div>
@@ -105,7 +167,7 @@ export default function Donate() {
         </div>
       </div>
 
-      {/* 2-Column Main Workspace: Form on Left, Checklist on Right */}
+      {/* 2-Column Main Workspace */}
       <div className="dash-columns">
         {/* Left Column: Record a Donation Form */}
         <div className="card card-pad">
@@ -146,7 +208,13 @@ export default function Donate() {
                     </button>
                   )}
                 </div>
-                <select id="hospital" className={`select ${errors.hospital ? 'error' : ''}`} value={form.hospital} onChange={set('hospital')}>
+                <select
+                  id="hospital"
+                  disabled={submitting}
+                  className={`select ${errors.hospital ? 'error' : ''}`}
+                  value={form.hospital}
+                  onChange={set('hospital')}
+                >
                   <option value="">Select hospital</option>
                   {HOSPITALS.map((h) => <option key={h} value={h}>{h}</option>)}
                 </select>
@@ -155,19 +223,40 @@ export default function Donate() {
 
               <div className="form-group" style={{ marginBottom: 8 }}>
                 <label htmlFor="date" style={{ fontSize: '0.78rem' }}>Donation Date <span className="req">*</span></label>
-                <input id="date" type="date" className={`input ${errors.date ? 'error' : ''}`} value={form.date} onChange={set('date')} max={new Date().toISOString().slice(0, 10)} />
+                <input
+                  id="date"
+                  type="date"
+                  disabled={submitting}
+                  className={`input ${errors.date ? 'error' : ''}`}
+                  value={form.date}
+                  onChange={set('date')}
+                  max={new Date().toISOString().slice(0, 10)}
+                />
                 {errors.date && <div className="form-error">{errors.date}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 8 }}>
                 <label htmlFor="time" style={{ fontSize: '0.78rem' }}>Donation Time <span className="req">*</span></label>
-                <input id="time" type="time" className={`input ${errors.time ? 'error' : ''}`} value={form.time} onChange={set('time')} />
+                <input
+                  id="time"
+                  type="time"
+                  disabled={submitting}
+                  className={`input ${errors.time ? 'error' : ''}`}
+                  value={form.time}
+                  onChange={set('time')}
+                />
                 {errors.time && <div className="form-error">{errors.time}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 8 }}>
                 <label htmlFor="bloodGroup" style={{ fontSize: '0.78rem' }}>Blood Group <span className="req">*</span></label>
-                <select id="bloodGroup" className={`select ${errors.bloodGroup ? 'error' : ''}`} value={form.bloodGroup} onChange={set('bloodGroup')}>
+                <select
+                  id="bloodGroup"
+                  disabled={submitting}
+                  className={`select ${errors.bloodGroup ? 'error' : ''}`}
+                  value={form.bloodGroup}
+                  onChange={set('bloodGroup')}
+                >
                   {['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].map((g) => <option key={g} value={g}>{g}</option>)}
                 </select>
                 {errors.bloodGroup && <div className="form-error">{errors.bloodGroup}</div>}
@@ -175,26 +264,55 @@ export default function Donate() {
 
               <div className="form-group" style={{ marginBottom: 8 }}>
                 <label htmlFor="units" style={{ fontSize: '0.78rem' }}>Units Donated <span className="req">*</span></label>
-                <input id="units" type="number" min="1" max="5" className={`input ${errors.units ? 'error' : ''}`} value={form.units} onChange={set('units')} />
+                <input
+                  id="units"
+                  type="number"
+                  min="1"
+                  max="5"
+                  disabled={submitting}
+                  className={`input ${errors.units ? 'error' : ''}`}
+                  value={form.units}
+                  onChange={set('units')}
+                />
                 {errors.units && <div className="form-error">{errors.units}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 8 }}>
                 <label htmlFor="location" style={{ fontSize: '0.78rem' }}>Location <span className="req">*</span></label>
-                <input id="location" className={`input ${errors.location ? 'error' : ''}`} placeholder="City" value={form.location} onChange={set('location')} />
+                <input
+                  id="location"
+                  disabled={submitting}
+                  className={`input ${errors.location ? 'error' : ''}`}
+                  placeholder="City or neighborhood"
+                  value={form.location}
+                  onChange={set('location')}
+                />
                 {errors.location && <div className="form-error">{errors.location}</div>}
               </div>
             </div>
 
-            <button type="submit" className="btn btn-primary" style={{ marginTop: 8, padding: '7px 18px', fontSize: '0.84rem' }}>
-              <Droplet size={16} /> Submit Donation
+            <button
+              type="submit"
+              disabled={submitting}
+              className="btn btn-primary"
+              style={{
+                marginTop: 8,
+                padding: '7px 18px',
+                fontSize: '0.84rem',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                cursor: submitting ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {submitting ? <Loader2 size={16} className="animate-spin" /> : <Droplet size={16} />}
+              {submitting ? 'Recording Donation...' : 'Submit Donation'}
             </button>
           </form>
         </div>
 
-        {/* Right Column: Compact Preparation & Safety Guide with Photo */}
+        {/* Right Column: Preparation & Safety Guide */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {/* Visual Clinical Standard Banner */}
           <div
             className="card"
             style={{
@@ -284,7 +402,7 @@ export default function Donate() {
       <HospitalGpsModal
         open={gpsModal}
         onClose={() => setGpsModal(false)}
-        hospitalName={form.hospital || 'Kenyatta National Hospital'}
+        hospitalName={form.hospital || 'Kenyatta'}
         locationName={form.location || user.location}
         user={user}
       />

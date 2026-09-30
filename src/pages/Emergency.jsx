@@ -1,4 +1,4 @@
-// Emergency — create emergency requests + respond to existing ones
+// Emergency — live emergency requests list + create requests & GPS routing
 import { useState, useEffect } from 'react';
 import {
   PhoneCall,
@@ -7,21 +7,20 @@ import {
   MapPin,
   Package,
   AlertTriangle,
-  Info,
-  Clock,
-  ShieldAlert,
-  Sparkles,
   Navigation,
   Compass,
-  ExternalLink,
+  Loader2,
+  RefreshCw,
+  AlertCircle,
 } from 'lucide-react';
 import { useAuth } from '../auth';
 import { useToast } from '../toast';
 import StatusBadge from '../components/StatusBadge';
 import Modal from '../components/Modal';
 import HospitalGpsModal from '../components/HospitalGpsModal';
-import { getEmergencies, addEmergency, addNotification } from '../store';
+import { addNotification } from '../store';
 import { getHospitalLocation, getNavigationUrls } from '../data/hospitals';
+import { getEmergencies, createEmergency } from '../service/emergencyService'; // Adjust to ../services/emergencyService if using plural
 
 const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 const URGENCIES = ['Critical', 'Urgent', 'Normal'];
@@ -32,16 +31,57 @@ export default function Emergency() {
 
   const [activeTab, setActiveTab] = useState('list'); // 'list' | 'post'
   const [emergencies, setEmergencies] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
   const [form, setForm] = useState({
-    bloodGroup: '', hospital: '', location: '', units: '', urgency: 'Urgent', contact: '', info: '',
+    bloodGroup: '',
+    hospital: '',
+    location: '',
+    units: '',
+    urgency: 'Urgent',
+    contact: '',
+    info: '',
   });
   const [errors, setErrors] = useState({});
   const [detail, setDetail] = useState(null);
   const [respond, setRespond] = useState(null);
   const [gpsTarget, setGpsTarget] = useState(null);
 
-  const refresh = () => setEmergencies(getEmergencies());
-  useEffect(() => { refresh(); }, []);
+  const fetchLiveEmergencies = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getEmergencies(true);
+
+      // Normalize live backend emergency model to match UI requirements
+      const normalized = (Array.isArray(data) ? data : []).map((em) => ({
+        id: em.id,
+        hospital: em.hospitalName || em.hospital || 'Hospital Facility',
+        bloodGroup: em.bloodGroup || '—',
+        units: em.unitsRequired || em.units || 1,
+        urgency: em.urgencyLevel || em.urgency || 'URGENT',
+        location: em.location || '—',
+        contact: em.contactNumber || em.contact || '—',
+        status: em.status || 'ACTIVE',
+        date: em.createdAt ? new Date(em.createdAt).toISOString().slice(0, 10) : 'Active',
+        info: em.info || '',
+      }));
+
+      setEmergencies(normalized);
+    } catch (err) {
+      const msg = err.message || 'Unable to retrieve live emergency blood requests.';
+      setError(msg);
+      toast(msg, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchLiveEmergencies();
+  }, []);
 
   if (!user) return null;
 
@@ -56,29 +96,49 @@ export default function Emergency() {
     if (!form.bloodGroup) e.bloodGroup = 'Blood group is required.';
     if (!form.hospital.trim()) e.hospital = 'Hospital is required.';
     if (!form.location.trim()) e.location = 'Location is required.';
-    if (!form.units || form.units < 1) e.units = 'Units needed is required.';
+    if (!form.units || Number(form.units) < 1) e.units = 'Units needed is required.';
     if (!form.urgency) e.urgency = 'Urgency level is required.';
     if (!form.contact.trim()) e.contact = 'Contact number is required.';
     setErrors(e);
     return Object.keys(e).length === 0;
   };
 
-  const handleSubmit = (ev) => {
+  const handleSubmit = async (ev) => {
     ev.preventDefault();
     if (!validate()) {
       toast('Please fill in all required fields.', 'error');
       return;
     }
-    addEmergency({ ...form, units: parseInt(form.units, 10) });
-    addNotification({
-      title: 'Emergency Blood Request Posted',
-      message: `Your ${form.urgency.toLowerCase()} request for ${form.bloodGroup} blood at ${form.hospital} has been posted.`,
-      type: 'emergency',
-    });
-    toast('Emergency blood request posted successfully.', 'success');
-    refresh();
-    setForm({ bloodGroup: '', hospital: '', location: '', units: '', urgency: 'Urgent', contact: '', info: '' });
-    setActiveTab('list');
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        hospitalUserId: user.id,
+        hospitalName: form.hospital.trim(),
+        bloodGroup: form.bloodGroup,
+        unitsRequired: parseInt(form.units, 10),
+        location: form.location.trim(),
+        contactNumber: form.contact.trim(),
+        urgencyLevel: form.urgency.toUpperCase(),
+      };
+
+      const res = await createEmergency(payload);
+
+      addNotification({
+        title: 'Emergency Blood Request Posted',
+        message: `Your ${form.urgency.toLowerCase()} request for ${form.bloodGroup} blood at ${form.hospital} has been broadcasted.`,
+        type: 'emergency',
+      });
+
+      toast(res?.message || 'Emergency blood request broadcasted successfully.', 'success');
+      setForm({ bloodGroup: '', hospital: '', location: '', units: '', urgency: 'Urgent', contact: '', info: '' });
+      setActiveTab('list');
+      await fetchLiveEmergencies();
+    } catch (err) {
+      toast(err.message || 'Failed to post emergency blood request.', 'error');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleRespond = () => {
@@ -86,19 +146,26 @@ export default function Emergency() {
       toast('You must be marked as available to respond. Go to Donate to update your status.', 'error');
       return;
     }
-    if (user.bloodGroup !== respond.bloodGroup) {
+
+    // Normalized matching for relaxed blood group checks
+    const userBg = String(user.bloodGroup || '').toUpperCase();
+    const reqBg = String(respond.bloodGroup || '').toUpperCase();
+
+    if (userBg !== reqBg && !userBg.startsWith(reqBg)) {
       toast(`Your blood group (${user.bloodGroup}) does not match the request (${respond.bloodGroup}).`, 'error');
       return;
     }
+
     const currentRespond = respond;
     addNotification({
       title: 'Emergency Response Confirmed',
       message: `You have responded to the ${currentRespond.urgency.toLowerCase()} request for ${currentRespond.bloodGroup} blood at ${currentRespond.hospital}. Please contact ${currentRespond.contact}.`,
       type: 'success',
     });
+
     toast(`Response confirmed! Opening GPS navigation to ${currentRespond.hospital}...`, 'success');
     setRespond(null);
-    // Direct donor immediately to the hospital GPS route and arrival pass!
+
     setGpsTarget({
       hospital: currentRespond.hospital,
       location: currentRespond.location,
@@ -108,7 +175,7 @@ export default function Emergency() {
 
   return (
     <div>
-      {/* Compact Visual Emergency Trauma Dispatch Banner */}
+      {/* Visual Emergency Trauma Dispatch Banner */}
       <div
         className="card section-gap"
         style={{
@@ -154,7 +221,6 @@ export default function Emergency() {
             </div>
           </div>
 
-          {/* High-Visibility Emergency Dispatch Visual */}
           <div
             className="eb-image-wrap"
             style={{
@@ -198,7 +264,7 @@ export default function Emergency() {
         </div>
       </div>
 
-      {/* Segmented Tab Navigation to minimize vertical scrolling */}
+      {/* Tab Navigation */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
         <div style={{ display: 'inline-flex', background: 'rgba(15, 23, 42, 0.6)', padding: 3, borderRadius: 10, backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.15)' }}>
           <button
@@ -243,23 +309,70 @@ export default function Emergency() {
           </button>
         </div>
 
-        {activeTab === 'list' && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button
-            type="button"
-            className="btn btn-danger btn-sm"
-            onClick={() => setActiveTab('post')}
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 14px', fontSize: '0.8rem' }}
+            className="btn btn-outline btn-sm"
+            onClick={fetchLiveEmergencies}
+            disabled={loading}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 12px' }}
           >
-            <PhoneCall size={14} />
-            <span>Create New Request</span>
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            Refresh
           </button>
-        )}
+          {activeTab === 'list' && (
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              onClick={() => setActiveTab('post')}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 14px', fontSize: '0.8rem' }}
+            >
+              <PhoneCall size={14} />
+              <span>Create New Request</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Tab 1: Active Requests List */}
       {activeTab === 'list' && (
         <div>
-          {emergencies.length === 0 ? (
+          {loading ? (
+            <div
+              className="card card-pad"
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '48px 16px',
+                gap: 12,
+              }}
+            >
+              <Loader2 size={32} className="animate-spin" color="var(--primary-600)" />
+              <span style={{ fontSize: '0.86rem', color: 'var(--neutral-500)' }}>
+                Retrieving active emergency blood requests...
+              </span>
+            </div>
+          ) : error ? (
+            <div
+              className="card card-pad"
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '36px 16px',
+                gap: 10,
+                textAlign: 'center',
+              }}
+            >
+              <AlertCircle size={36} color="var(--danger-500, #ef4444)" />
+              <p style={{ margin: 0, fontWeight: 600, color: 'var(--neutral-800)' }}>{error}</p>
+              <button className="btn btn-outline btn-sm" onClick={fetchLiveEmergencies}>
+                Try Again
+              </button>
+            </div>
+          ) : emergencies.length === 0 ? (
             <div className="card card-pad empty-state">
               <Droplet size={38} className="es-icon" color="var(--neutral-400)" />
               <p style={{ margin: 0 }}>No active emergency requests right now.</p>
@@ -269,12 +382,16 @@ export default function Emergency() {
               {emergencies.map((em) => (
                 <div key={em.id} className="emergency-card" style={{ padding: '12px 14px' }}>
                   <div className="ec-top" style={{ marginBottom: 8 }}>
-                    <div className="ec-blood" style={{ width: 36, height: 36, fontSize: '0.9rem' }}>{em.bloodGroup}</div>
+                    <div className="ec-blood" style={{ width: 36, height: 36, fontSize: '0.9rem' }}>
+                      {em.bloodGroup}
+                    </div>
                     <StatusBadge status={em.urgency} label={em.urgency.toUpperCase()} />
                   </div>
                   <div className="ec-info" style={{ gap: 4, fontSize: '0.8rem' }}>
                     <div className="ec-row">
-                      <span className="ec-key"><Building2 size={13} /> Hospital</span>
+                      <span className="ec-key">
+                        <Building2 size={13} /> Hospital
+                      </span>
                       <span
                         className="ec-val"
                         onClick={() => openGps(em.hospital, em.location, em)}
@@ -285,9 +402,24 @@ export default function Emergency() {
                         <Navigation size={11} color="var(--primary-600)" />
                       </span>
                     </div>
-                    <div className="ec-row"><span className="ec-key"><MapPin size={13} /> Location</span><span className="ec-val">{em.location}</span></div>
-                    <div className="ec-row"><span className="ec-key"><Package size={13} /> Units</span><span className="ec-val">{em.units} Unit(s)</span></div>
-                    <div className="ec-row"><span className="ec-key"><PhoneCall size={13} /> Contact</span><span className="ec-val">{em.contact}</span></div>
+                    <div className="ec-row">
+                      <span className="ec-key">
+                        <MapPin size={13} /> Location
+                      </span>
+                      <span className="ec-val">{em.location}</span>
+                    </div>
+                    <div className="ec-row">
+                      <span className="ec-key">
+                        <Package size={13} /> Units
+                      </span>
+                      <span className="ec-val">{em.units} Unit(s)</span>
+                    </div>
+                    <div className="ec-row">
+                      <span className="ec-key">
+                        <PhoneCall size={13} /> Contact
+                      </span>
+                      <span className="ec-val">{em.contact}</span>
+                    </div>
                   </div>
                   <div className="ec-actions" style={{ marginTop: 10, paddingTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     <button className="btn btn-primary btn-sm" onClick={() => setRespond(em)} style={{ padding: '4px 10px', fontSize: '0.78rem' }}>
@@ -321,7 +453,9 @@ export default function Emergency() {
             </div>
             <div>
               <h3 style={{ marginBottom: 0, fontSize: '1rem' }}>Post a Blood Request</h3>
-              <p className="text-muted" style={{ margin: 0, fontSize: '0.78rem' }}>Fill in details to alert matching donors immediately.</p>
+              <p className="text-muted" style={{ margin: 0, fontSize: '0.78rem' }}>
+                Fill in details to alert matching donors immediately.
+              </p>
             </div>
           </div>
 
@@ -329,56 +463,77 @@ export default function Emergency() {
             <div className="cards-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
               <div className="form-group" style={{ marginBottom: 10 }}>
                 <label htmlFor="bg" style={{ fontSize: '0.78rem' }}>Blood Group Needed <span className="req">*</span></label>
-                <select id="bg" className={`select ${errors.bloodGroup ? 'error' : ''}`} value={form.bloodGroup} onChange={set('bloodGroup')}>
+                <select id="bg" disabled={submitting} className={`select ${errors.bloodGroup ? 'error' : ''}`} value={form.bloodGroup} onChange={set('bloodGroup')}>
                   <option value="">Select blood group</option>
-                  {BLOOD_GROUPS.map((g) => <option key={g} value={g}>{g}</option>)}
+                  {BLOOD_GROUPS.map((g) => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
                 </select>
                 {errors.bloodGroup && <div className="form-error">{errors.bloodGroup}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 10 }}>
                 <label htmlFor="hosp" style={{ fontSize: '0.78rem' }}>Hospital <span className="req">*</span></label>
-                <input id="hosp" className={`input ${errors.hospital ? 'error' : ''}`} placeholder="Hospital name" value={form.hospital} onChange={set('hospital')} />
+                <input id="hosp" disabled={submitting} className={`input ${errors.hospital ? 'error' : ''}`} placeholder="Hospital name" value={form.hospital} onChange={set('hospital')} />
                 {errors.hospital && <div className="form-error">{errors.hospital}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 10 }}>
                 <label htmlFor="loc" style={{ fontSize: '0.78rem' }}>Location <span className="req">*</span></label>
-                <input id="loc" className={`input ${errors.location ? 'error' : ''}`} placeholder="City / Area" value={form.location} onChange={set('location')} />
+                <input id="loc" disabled={submitting} className={`input ${errors.location ? 'error' : ''}`} placeholder="City / Area" value={form.location} onChange={set('location')} />
                 {errors.location && <div className="form-error">{errors.location}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 10 }}>
                 <label htmlFor="units" style={{ fontSize: '0.78rem' }}>Units Needed <span className="req">*</span></label>
-                <input id="units" type="number" min="1" className={`input ${errors.units ? 'error' : ''}`} placeholder="e.g. 3" value={form.units} onChange={set('units')} />
+                <input id="units" disabled={submitting} type="number" min="1" className={`input ${errors.units ? 'error' : ''}`} placeholder="e.g. 3" value={form.units} onChange={set('units')} />
                 {errors.units && <div className="form-error">{errors.units}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 10 }}>
                 <label htmlFor="urgency" style={{ fontSize: '0.78rem' }}>Urgency <span className="req">*</span></label>
-                <select id="urgency" className={`select ${errors.urgency ? 'error' : ''}`} value={form.urgency} onChange={set('urgency')}>
-                  {URGENCIES.map((u) => <option key={u} value={u}>{u}</option>)}
+                <select id="urgency" disabled={submitting} className={`select ${errors.urgency ? 'error' : ''}`} value={form.urgency} onChange={set('urgency')}>
+                  {URGENCIES.map((u) => (
+                    <option key={u} value={u}>{u}</option>
+                  ))}
                 </select>
                 {errors.urgency && <div className="form-error">{errors.urgency}</div>}
               </div>
 
               <div className="form-group" style={{ marginBottom: 10 }}>
                 <label htmlFor="contact" style={{ fontSize: '0.78rem' }}>Contact Number <span className="req">*</span></label>
-                <input id="contact" className={`input ${errors.contact ? 'error' : ''}`} placeholder="07XXXXXXXX" value={form.contact} onChange={set('contact')} />
+                <input id="contact" disabled={submitting} className={`input ${errors.contact ? 'error' : ''}`} placeholder="07XXXXXXXX" value={form.contact} onChange={set('contact')} />
                 {errors.contact && <div className="form-error">{errors.contact}</div>}
               </div>
             </div>
 
             <div className="form-group" style={{ marginBottom: 12 }}>
               <label htmlFor="info" style={{ fontSize: '0.78rem' }}>Additional Patient Notes</label>
-              <textarea id="info" className="textarea" rows={2} placeholder="Any specific requirements or emergency notes..." value={form.info} onChange={set('info')} />
+              <textarea id="info" disabled={submitting} className="textarea" rows={2} placeholder="Any specific requirements or emergency notes..." value={form.info} onChange={set('info')} />
             </div>
 
             <div style={{ display: 'flex', gap: 10 }}>
-              <button type="submit" className="btn btn-danger" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                <PhoneCall size={16} /> Broadcast Emergency Blood Request
+              <button
+                type="submit"
+                disabled={submitting}
+                className="btn btn-danger"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  opacity: submitting ? 0.75 : 1,
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {submitting ? <Loader2 size={16} className="animate-spin" /> : <PhoneCall size={16} />}
+                <span>{submitting ? 'Broadcasting Request...' : 'Broadcast Emergency Blood Request'}</span>
               </button>
-              <button type="button" className="btn btn-ghost" onClick={() => setActiveTab('list')}>
+              <button
+                type="button"
+                disabled={submitting}
+                className="btn btn-ghost"
+                onClick={() => setActiveTab('list')}
+              >
                 Cancel
               </button>
             </div>
@@ -386,13 +541,14 @@ export default function Emergency() {
         </div>
       )}
 
-      {/* Detail modal */}
-      <Modal open={!!detail} onClose={() => setDetail(null)} title="Emergency Request Details"
-        footer={<button className="btn btn-primary" onClick={() => setDetail(null)}>Close</button>}>
+      {/* Detail Modal */}
+      <Modal open={!!detail} onClose={() => setDetail(null)} title="Emergency Request Details" footer={<button className="btn btn-primary" onClick={() => setDetail(null)}>Close</button>}>
         {detail && (
           <div>
             <div className="flex items-center gap-3 mb-4">
-              <div className="ec-blood" style={{ width: 56, height: 56, fontSize: '1.1rem' }}>{detail.bloodGroup}</div>
+              <div className="ec-blood" style={{ width: 56, height: 56, fontSize: '1.1rem' }}>
+                {detail.bloodGroup}
+              </div>
               <StatusBadge status={detail.urgency} label={detail.urgency.toUpperCase()} />
             </div>
             <div className="profile-info-list">
@@ -405,7 +561,6 @@ export default function Emergency() {
             </div>
             {detail.info && <p className="text-muted mt-4" style={{ lineHeight: 1.6 }}>{detail.info}</p>}
 
-            {/* GPS Hospital Location & Route banner */}
             <div
               style={{
                 marginTop: 16,
@@ -458,14 +613,18 @@ export default function Emergency() {
         )}
       </Modal>
 
-      {/* Respond modal */}
-      <Modal open={!!respond} onClose={() => setRespond(null)} title="Respond to Emergency Request"
+      {/* Respond Modal */}
+      <Modal
+        open={!!respond}
+        onClose={() => setRespond(null)}
+        title="Respond to Emergency Request"
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setRespond(null)}>Cancel</button>
             <button className="btn btn-primary" onClick={handleRespond}>Confirm Response & Route</button>
           </>
-        }>
+        }
+      >
         {respond && (() => {
           const hospData = getHospitalLocation(respond.hospital, respond.location);
           const navUrls = getNavigationUrls(hospData);
@@ -481,7 +640,6 @@ export default function Emergency() {
                 <div className="profile-info-row"><span className="pi-key">Contact</span><span className="pi-val">{respond.contact}</span></div>
               </div>
 
-              {/* Verified Hospital GPS & Navigation Preview */}
               <div
                 style={{
                   marginTop: 14,
